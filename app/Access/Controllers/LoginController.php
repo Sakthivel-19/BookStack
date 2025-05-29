@@ -59,6 +59,37 @@ class LoginController extends Controller
     /**
      * Handle a login request to the application.
      */
+    // public function login(Request $request)
+    // {
+    //     $this->validateLogin($request);
+    //     $username = $request->get($this->username());
+
+    //     // Check login throttling attempts to see if they've gone over the limit
+    //     if ($this->hasTooManyLoginAttempts($request)) {
+    //         Activity::logFailedLogin($username);
+    //         return $this->sendLockoutResponse($request);
+    //     }
+
+    //     try {
+    //         if ($this->attemptLogin($request)) {
+    //             return $this->sendLoginResponse($request);
+    //         }
+    //     } catch (LoginAttemptException $exception) {
+    //         Activity::logFailedLogin($username);
+
+    //         return $this->sendLoginAttemptExceptionResponse($exception, $request);
+    //     }
+
+    //     // On unsuccessful login attempt, Increment login attempts for throttling and log failed login.
+    //     $this->incrementLoginAttempts($request);
+    //     Activity::logFailedLogin($username);
+
+    //     // Throw validation failure for failed login
+    //     throw ValidationException::withMessages([
+    //         $this->username() => [trans('auth.failed')],
+    //     ])->redirectTo('/login');
+    // }
+
     public function login(Request $request)
     {
         $this->validateLogin($request);
@@ -71,23 +102,67 @@ class LoginController extends Controller
         }
 
         try {
-            if ($this->attemptLogin($request)) {
+            if ($this->attemptApiLogin($request)) {
                 return $this->sendLoginResponse($request);
             }
+            Activity::logFailedLogin($username);
+            $this->incrementLoginAttempts($request);
+            return redirect()->to('/login')
+                ->withInput()
+                ->withErrors([
+                    $this->username() => trans('auth.failed'),
+                ]);
         } catch (LoginAttemptException $exception) {
             Activity::logFailedLogin($username);
-
             return $this->sendLoginAttemptExceptionResponse($exception, $request);
+        } catch (\Exception $e) {
+            Activity::logFailedLogin($username);
+            return redirect()->to('/login')
+                ->withInput()
+                ->withErrors(['login' => 'Login failed: ' . $e->getMessage()]);
         }
+    }
 
-        // On unsuccessful login attempt, Increment login attempts for throttling and log failed login.
-        $this->incrementLoginAttempts($request);
-        Activity::logFailedLogin($username);
+    /**
+     * Custom method to call Pathway API and login user into BookStack
+     */
+    protected function attemptApiLogin(Request $request): bool
+    {
+        $credentials = [
+            'username' => $request->input($this->username()),
+            'password' => $request->input('password'),
+        ];
 
-        // Throw validation failure for failed login
-        throw ValidationException::withMessages([
-            $this->username() => [trans('auth.failed')],
-        ])->redirectTo('/login');
+        try {
+            $client = new \GuzzleHttp\Client(['verify' => false]);
+            $response = $client->post('https://uatapi.pathway.live/user/login', [
+                'json' => [
+                    'grant_type' => 'password',
+                    'username' => $credentials['username'],
+                    'password' => $credentials['password'],
+                ]
+            ]);
+
+            $body = json_decode($response->getBody(), true);
+
+            if ($response->getStatusCode() === 200 && isset($body['access_token'])) {
+                $user = \BookStack\Users\Models\User::firstOrCreate(
+                    ['email' => $body['email']],
+                    [
+                        'name' => $body['first_name'] ?? 'Unknown',
+                        'password' => bcrypt(\Illuminate\Support\Str::random(16)),
+                    ]
+                );
+
+                \Illuminate\Support\Facades\Auth::login($user, $request->filled('remember'));
+                session(['pathway_token' => $body['access_token']]);
+                return true;
+            }
+            return false;
+        } catch (\GuzzleHttp\Exception\ClientException $e) {
+            // Handle 4xx errors specifically
+            return false;
+        }
     }
 
     /**
@@ -129,14 +204,14 @@ class LoginController extends Controller
     /**
      * Attempt to log the user into the application.
      */
-    protected function attemptLogin(Request $request): bool
-    {
-        return $this->loginService->attempt(
-            $this->credentials($request),
-            auth()->getDefaultDriver(),
-            $request->filled('remember')
-        );
-    }
+    // protected function attemptLogin(Request $request): bool
+    // {
+    //     return $this->loginService->attempt(
+    //         $this->credentials($request),
+    //         auth()->getDefaultDriver(),
+    //         $request->filled('remember')
+    //     );
+    // }
 
 
     /**
